@@ -1,5 +1,7 @@
+```
 kalkulator/
-├── go.mod          (go mod init kalkulator)
-├── main.go
-└── math/
-    └── math.go
+|── go.mod
+|── main.go
+|-- math/
+    |-- math.go
+```
