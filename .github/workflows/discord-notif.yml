@@ -23,45 +23,50 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DISCORD_GITHUB_WEBHOOK: ${{ secrets.DISCORD_GITHUB_WEBHOOK }}
           DISCORD_BOARD_WEBHOOK: ${{ secrets.DISCORD_BOARD_WEBHOOK }}
-          EVENT_NAME: ${{ github.event_name }}
-          EVENT_PATH: ${{ github.event_path }}
-          ACTOR: ${{ github.actor }}
-          REPO: ${{ github.repository }}
         run: |
           python3 - << 'EOF'
           import json
           import os
           import urllib.request
 
-          event_name = os.environ.get("EVENT_NAME", "")
-          event_path = os.environ.get("EVENT_PATH", "")
-          actor = os.environ.get("ACTOR", "github-user")
-          repo = os.environ.get("REPO", "")
+          # Gunakan environment variable bawaan GitHub Actions Runner
+          event_name = os.environ.get("GITHUB_EVENT_NAME", "")
+          event_path = os.environ.get("GITHUB_EVENT_PATH", "")
+          actor = os.environ.get("GITHUB_ACTOR", "github-user")
+          repo = os.environ.get("GITHUB_REPOSITORY", "")
           token = os.environ.get("GITHUB_TOKEN", "")
           gh_webhook = os.environ.get("DISCORD_GITHUB_WEBHOOK", "").strip()
           board_webhook = os.environ.get("DISCORD_BOARD_WEBHOOK", "").strip()
+
+          # Fallback jika baru salah satu secret yang diisi
+          if not gh_webhook and board_webhook:
+              gh_webhook = board_webhook
+          if not board_webhook and gh_webhook:
+              board_webhook = gh_webhook
+
+          if not event_path or not os.path.exists(event_path):
+              print("Event path tidak ditemukan, selesai.")
+              raise SystemExit(0)
 
           with open(event_path, "r", encoding="utf-8") as f:
               ev = json.load(f)
 
           # Ambil nama asli & foto profil dari GitHub API
-          actor_name = actor
+          actor_name = f"@{actor}"
           avatar_url = ev.get("sender", {}).get("avatar_url", f"https://github.com/{actor}.png")
           actor_url = ev.get("sender", {}).get("html_url", f"https://github.com/{actor}")
           try:
-              req = urllib.request.Request(
-                  f"https://api.github.com/users/{actor}",
-                  headers={"Authorization": f"Bearer {token}", "User-Agent": "PPL-Discord-Bot"} if token else {"User-Agent": "PPL-Discord-Bot"}
-              )
+              headers = {"User-Agent": "PPL-Discord-Bot"}
+              if token:
+                  headers["Authorization"] = f"Bearer {token}"
+              req = urllib.request.Request(f"https://api.github.com/users/{actor}", headers=headers)
               with urllib.request.urlopen(req, timeout=5) as resp:
                   uinfo = json.loads(resp.read().decode("utf-8"))
                   if uinfo.get("name"):
                       actor_name = f"{uinfo['name']} (@{actor})"
-                  else:
-                      actor_name = f"@{actor}"
                   avatar_url = uinfo.get("avatar_url", avatar_url)
           except Exception:
-              actor_name = f"@{actor}"
+              pass
 
           target_webhook = None
           bot_name = "GitHub Agile Bot"
@@ -82,7 +87,7 @@ jobs:
 
           elif event_name == "push":
               commits = ev.get("commits", [])
-              if commits and not ev.get("created", False):
+              if commits:
                   ref = ev.get("ref", "").replace("refs/heads/", "")
                   compare_url = ev.get("compare", f"https://github.com/{repo}")
                   commit_lines = []
@@ -278,7 +283,6 @@ jobs:
                   }
 
           if embed and target_webhook:
-              # Pastikan tidak ada /github di akhir URL agar format custom Embed Bahasa Indonesia tampil penuh
               if target_webhook.endswith("/github"):
                   target_webhook = target_webhook[:-7]
 
@@ -308,5 +312,5 @@ jobs:
               with urllib.request.urlopen(req, timeout=10) as resp:
                   print(f"Sent Discord notification successfully! HTTP {resp.status}")
           else:
-              print("No notification needed or webhook secret not configured yet.")
+              print(f"Event '{event_name}' selesai (tidak ada target webhook atau bukan event yang dipantau).")
           EOF
