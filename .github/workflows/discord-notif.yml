@@ -1,0 +1,312 @@
+name: Discord Agile & GitHub Notifier (Bahasa Indonesia)
+
+on:
+  create:
+  push:
+  pull_request:
+    types: [opened, closed, reopened, review_requested]
+  pull_request_review:
+    types: [submitted]
+  pull_request_review_comment:
+    types: [created]
+  issues:
+    types: [opened, closed, reopened, assigned, labeled]
+  issue_comment:
+    types: [created]
+
+jobs:
+  send-discord-notification:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Kirim Notifikasi ke Discord (#github-notif / #board-notif)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DISCORD_GITHUB_WEBHOOK: ${{ secrets.DISCORD_GITHUB_WEBHOOK }}
+          DISCORD_BOARD_WEBHOOK: ${{ secrets.DISCORD_BOARD_WEBHOOK }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_PATH: ${{ github.event_path }}
+          ACTOR: ${{ github.actor }}
+          REPO: ${{ github.repository }}
+        run: |
+          python3 - << 'EOF'
+          import json
+          import os
+          import urllib.request
+
+          event_name = os.environ.get("EVENT_NAME", "")
+          event_path = os.environ.get("EVENT_PATH", "")
+          actor = os.environ.get("ACTOR", "github-user")
+          repo = os.environ.get("REPO", "")
+          token = os.environ.get("GITHUB_TOKEN", "")
+          gh_webhook = os.environ.get("DISCORD_GITHUB_WEBHOOK", "").strip()
+          board_webhook = os.environ.get("DISCORD_BOARD_WEBHOOK", "").strip()
+
+          with open(event_path, "r", encoding="utf-8") as f:
+              ev = json.load(f)
+
+          # Ambil nama asli & foto profil dari GitHub API
+          actor_name = actor
+          avatar_url = ev.get("sender", {}).get("avatar_url", f"https://github.com/{actor}.png")
+          actor_url = ev.get("sender", {}).get("html_url", f"https://github.com/{actor}")
+          try:
+              req = urllib.request.Request(
+                  f"https://api.github.com/users/{actor}",
+                  headers={"Authorization": f"Bearer {token}", "User-Agent": "PPL-Discord-Bot"} if token else {"User-Agent": "PPL-Discord-Bot"}
+              )
+              with urllib.request.urlopen(req, timeout=5) as resp:
+                  uinfo = json.loads(resp.read().decode("utf-8"))
+                  if uinfo.get("name"):
+                      actor_name = f"{uinfo['name']} (@{actor})"
+                  else:
+                      actor_name = f"@{actor}"
+                  avatar_url = uinfo.get("avatar_url", avatar_url)
+          except Exception:
+              actor_name = f"@{actor}"
+
+          target_webhook = None
+          bot_name = "GitHub Agile Bot"
+          embed = None
+
+          # ================= I-1: AKTIVITAS KODE (#github-notif) =================
+          if event_name == "create":
+              if ev.get("ref_type") == "branch":
+                  branch = ev.get("ref", "")
+                  target_webhook = gh_webhook
+                  bot_name = f"{actor} • GitHub Branch"
+                  embed = {
+                      "title": f"🌿 Branch Baru Dibuat: `{branch}`",
+                      "url": f"https://github.com/{repo}/tree/{branch}",
+                      "description": f"**{actor_name}** baru saja membuat branch baru **`{branch}`** pada repositori **{repo}**.",
+                      "color": 0x2EA043,
+                  }
+
+          elif event_name == "push":
+              commits = ev.get("commits", [])
+              if commits and not ev.get("created", False):
+                  ref = ev.get("ref", "").replace("refs/heads/", "")
+                  compare_url = ev.get("compare", f"https://github.com/{repo}")
+                  commit_lines = []
+                  for c in commits[:8]:
+                      short_id = c.get("id", "")[:7]
+                      msg = c.get("message", "").splitlines()[0]
+                      url = c.get("url", compare_url)
+                      commit_lines.append(f"• [`{short_id}`]({url}) {msg}")
+                  target_webhook = gh_webhook
+                  bot_name = f"{actor} • GitHub Push"
+                  embed = {
+                      "title": f"💻 Commit & Push Baru ke Branch `{ref}` ({len(commits)} commit)",
+                      "url": compare_url,
+                      "description": f"**{actor_name}** mendorong perubahan kode baru ke branch **`{ref}`**:\n\n" + "\n".join(commit_lines),
+                      "color": 0x1F6FEB,
+                  }
+
+          elif event_name == "pull_request":
+              action = ev.get("action", "")
+              pr = ev.get("pull_request", {})
+              num = pr.get("number")
+              title = pr.get("title", "")
+              pr_url = pr.get("html_url", "")
+              head = pr.get("head", {}).get("ref", "")
+              base = pr.get("base", {}).get("ref", "")
+              merged = pr.get("merged", False)
+              target_webhook = gh_webhook
+              bot_name = f"{actor} • Pull Request"
+
+              if action == "opened":
+                  embed = {
+                      "title": f"🔀 Pull Request Baru Dibuat: #{num} {title}",
+                      "url": pr_url,
+                      "description": (
+                          f"**{actor_name}** membuat Pull Request baru.\n"
+                          f"• **Cabang:** `{head}` ➔ `{base}`\n"
+                          f"• **Status:** 🟢 Open (Menunggu Review)"
+                      ),
+                      "color": 0x238636,
+                  }
+              elif action == "closed" and merged:
+                  embed = {
+                      "title": f"🟣 Pull Request Di-Merge: #{num} {title}",
+                      "url": pr_url,
+                      "description": (
+                          f"**{actor_name}** telah menggabungkan (**Merge**) Pull Request **#{num}**!\n"
+                          f"• **Cabang:** `{head}` ➔ `{base}`\n"
+                          f"• **Status:** 🟣 Merged"
+                      ),
+                      "color": 0x8957E5,
+                  }
+              elif action == "closed" and not merged:
+                  embed = {
+                      "title": f"🔴 Pull Request Ditutup: #{num} {title}",
+                      "url": pr_url,
+                      "description": f"**{actor_name}** menutup Pull Request **#{num}** tanpa merge.",
+                      "color": 0xDA3633,
+                  }
+              elif action == "reopened":
+                  embed = {
+                      "title": f"🔄 Pull Request Dibuka Kembali: #{num} {title}",
+                      "url": pr_url,
+                      "description": f"**{actor_name}** membuka kembali Pull Request **#{num}**.",
+                      "color": 0x238636,
+                  }
+              elif action == "review_requested":
+                  reviewer = ev.get("requested_reviewer", {}).get("login", "anggota tim")
+                  embed = {
+                      "title": f"👀 Permintaan Review PR: #{num} {title}",
+                      "url": pr_url,
+                      "description": f"**{actor_name}** meminta **@{reviewer}** untuk me-review Pull Request **#{num}**.",
+                      "color": 0xD29922,
+                  }
+
+          elif event_name == "pull_request_review":
+              review = ev.get("review", {})
+              pr = ev.get("pull_request", {})
+              state = review.get("state", "").lower()
+              num = pr.get("number")
+              title = pr.get("title", "")
+              body = (review.get("body") or "").strip()
+              url = review.get("html_url", pr.get("html_url", ""))
+              target_webhook = gh_webhook
+              bot_name = f"{actor} • PR Review"
+
+              if state == "approved":
+                  embed = {
+                      "title": f"✅ Pull Request Disetujui (Approved): #{num} {title}",
+                      "url": url,
+                      "description": f"**{actor_name}** telah memeriksa dan **Menyetujui (Approve)** Pull Request **#{num}**!" + (f"\n\n> 💬 *{body}*" if body else ""),
+                      "color": 0x2EA043,
+                  }
+              elif state == "changes_requested":
+                  embed = {
+                      "title": f"⚠️ Revisi Diminta pada PR: #{num} {title}",
+                      "url": url,
+                      "description": f"**{actor_name}** meminta perbaikan pada Pull Request **#{num}**." + (f"\n\n> 💬 *{body}*" if body else ""),
+                      "color": 0xD29922,
+                  }
+              elif state == "commented" and body:
+                  embed = {
+                      "title": f"💬 Komentar Review pada PR: #{num} {title}",
+                      "url": url,
+                      "description": f"**{actor_name}** memberikan catatan review pada PR **#{num}**:\n\n> {body}",
+                      "color": 0x58A6FF,
+                  }
+
+          elif event_name == "pull_request_review_comment":
+              comment = ev.get("comment", {})
+              pr = ev.get("pull_request", {})
+              target_webhook = gh_webhook
+              bot_name = f"{actor} • PR Code Comment"
+              embed = {
+                  "title": f"💬 Komentar Baris Kode PR #{pr.get('number')}: {pr.get('title')}",
+                  "url": comment.get("html_url", ""),
+                  "description": f"**{actor_name}** mengomentari kode pada `{comment.get('path', '')}`:\n\n> {comment.get('body', '')}",
+                  "color": 0x58A6FF,
+              }
+
+          # ================= I-3: AKTIVITAS BOARD / KARTU (#board-notif) =================
+          elif event_name == "issues":
+              action = ev.get("action", "")
+              issue = ev.get("issue", {})
+              num = issue.get("number")
+              title = issue.get("title", "")
+              url = issue.get("html_url", "")
+              assignees = [f"@{a.get('login')}" for a in issue.get("assignees", [])]
+              assignee_str = ", ".join(assignees) if assignees else "Belum ditugaskan"
+              target_webhook = board_webhook
+              bot_name = f"{actor} • Agile Board"
+
+              if action == "opened":
+                  embed = {
+                      "title": f"📋 Kartu Baru Dibuat di Board: #{num} {title}",
+                      "url": url,
+                      "description": (
+                          f"**{actor_name}** membuat kartu tugas baru di Board Agile.\n"
+                          f"• **Kartu:** `{title}`\n"
+                          f"• **Ditugaskan ke:** {assignee_str}\n"
+                          f"• **Status:** 🟢 Todo"
+                      ),
+                      "color": 0x2EA043,
+                  }
+              elif action == "assigned":
+                  assigned_user = ev.get("assignee", {}).get("login", "")
+                  embed = {
+                      "title": f"👤 Kartu Tugas Ditugaskan: #{num} {title}",
+                      "url": url,
+                      "description": (
+                          f"**{actor_name}** menugaskan kartu **`{title}`** kepada **@{assigned_user}**.\n"
+                          f"• **Penanggung Jawab Saat Ini:** {assignee_str}"
+                      ),
+                      "color": 0x1F6FEB,
+                  }
+              elif action == "closed":
+                  embed = {
+                      "title": f"🎉 Kartu Dipindahkan ke Kolom Done: #{num} {title}",
+                      "url": url,
+                      "description": (
+                          f"**{actor_name}** telah menyelesaikan kartu **`{title}`**!\n"
+                          f"• **Status Board:** 🟣 **Done (Selesai)**\n"
+                          f"• **Penanggung Jawab:** {assignee_str}"
+                      ),
+                      "color": 0x8957E5,
+                  }
+              elif action == "reopened":
+                  embed = {
+                      "title": f"🔄 Kartu Dibuka Kembali (In Progress / Todo): #{num} {title}",
+                      "url": url,
+                      "description": f"**{actor_name}** membuka kembali kartu **`{title}`** di Board.",
+                      "color": 0xD29922,
+                  }
+              elif action == "labeled":
+                  lbl = ev.get("label", {}).get("name", "")
+                  embed = {
+                      "title": f"🏷️ Label / Status Kartu Diperbarui: #{num} {title}",
+                      "url": url,
+                      "description": f"**{actor_name}** menambahkan label **`{lbl}`** pada kartu **`{title}`**.",
+                      "color": 0x58A6FF,
+                  }
+
+          elif event_name == "issue_comment":
+              issue = ev.get("issue", {})
+              comment = ev.get("comment", {})
+              if "pull_request" not in issue:
+                  target_webhook = board_webhook
+                  bot_name = f"{actor} • Diskusi Kartu"
+                  embed = {
+                      "title": f"💬 Komentar Baru pada Kartu #{issue.get('number')}: {issue.get('title')}",
+                      "url": comment.get("html_url", ""),
+                      "description": f"**{actor_name}** berkomentar pada kartu:\n\n> {comment.get('body', '')}",
+                      "color": 0x58A6FF,
+                  }
+
+          if embed and target_webhook:
+              # Pastikan tidak ada /github di akhir URL agar format custom Embed Bahasa Indonesia tampil penuh
+              if target_webhook.endswith("/github"):
+                  target_webhook = target_webhook[:-7]
+
+              embed["author"] = {
+                  "name": f"{actor_name}",
+                  "url": actor_url,
+                  "icon_url": avatar_url,
+              }
+              embed["thumbnail"] = {"url": avatar_url}
+              embed["footer"] = {
+                  "text": f"Repositori: {repo} • Integrasi Otomatis PPL",
+                  "icon_url": "https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png",
+              }
+
+              payload = {
+                  "username": bot_name,
+                  "avatar_url": avatar_url,
+                  "embeds": [embed],
+              }
+
+              req = urllib.request.Request(
+                  target_webhook,
+                  data=json.dumps(payload).encode("utf-8"),
+                  headers={"Content-Type": "application/json", "User-Agent": "PPL-Discord-Webhook"},
+                  method="POST",
+              )
+              with urllib.request.urlopen(req, timeout=10) as resp:
+                  print(f"Sent Discord notification successfully! HTTP {resp.status}")
+          else:
+              print("No notification needed or webhook secret not configured yet.")
+          EOF
